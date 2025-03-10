@@ -5,19 +5,19 @@ use std::{
 };
 
 use image::GenericImageView;
-use log::info;
-use wgpu::util::DeviceExt;
+use log::{info, warn};
+use wgpu::{util::DeviceExt, SurfaceError};
 
 // Main Thread only
 pub struct Display {
+    sprite_shader: wgpu::ShaderModule,
+
     config: wgpu::SurfaceConfiguration,
 
-    renderer: Option<Renderer>,
+    pub renderer: Option<Renderer>,
 
     // This needs to be after renderer, so it is dropped after it (since the Renderer includes a view into the Surface Texture)
     surface: wgpu::Surface<'static>,
-
-    sprite_shader: wgpu::ShaderModule,
 }
 
 impl Display {
@@ -196,7 +196,7 @@ impl Display {
                 queue,
                 device,
                 encoder,
-                output,
+                output: Some(output),
                 pipeline: render_pipeline,
                 vertex_buffer,
                 index_buffer,
@@ -226,14 +226,18 @@ impl Display {
 
             mem::drop(output);
 
-            self.surface.configure(&device, &self.config);
-
-            let output = self.surface.get_current_texture().unwrap();
+            let output = loop {
+                self.surface.configure(&device, &self.config);
+                match self.surface.get_current_texture() {
+                    Ok(v) => break v,
+                    Err(_) => continue,
+                }
+            };
 
             self.renderer = Some(Renderer {
                 device,
                 queue,
-                output,
+                output: Some(output),
                 encoder,
                 pipeline,
                 vertex_buffer,
@@ -269,15 +273,19 @@ impl Display {
             textures,
         } = renderer;
 
-        // submit will accept anything that implements IntoIter
-        queue.submit(std::iter::once(encoder.finish()));
-        output.present();
+        if let Some(output) = output {
+            // submit will accept anything that implements IntoIter
+            queue.submit(std::iter::once(encoder.finish()));
+            output.present();
+        } else {
+            warn!("Could not finish frame, due to missing output!")
+        }
 
         let encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
 
-        let output = self.surface.get_current_texture()?;
+        let output = self.surface.get_current_texture().ok();
 
         self.renderer = Some(Renderer {
             device,
@@ -300,7 +308,7 @@ impl Display {
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    output: wgpu::SurfaceTexture,
+    output: Option<wgpu::SurfaceTexture>,
     encoder: wgpu::CommandEncoder,
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
@@ -340,8 +348,11 @@ impl Renderer {
             ..Default::default()
         });
 
-        let view = self
-            .output
+        let Some(output) = &self.output else {
+            return;
+        };
+
+        let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -351,12 +362,7 @@ impl Renderer {
                 view: &view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.1,
-                        g: 0.2,
-                        b: 0.3,
-                        a: 1.0,
-                    }),
+                    load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -372,7 +378,7 @@ impl Renderer {
             let bind_group = if let Some(texture) = self.textures.get(texture_id) {
                 texture
             } else {
-                dbg!("Uploading texture {} to gpu", texture_id);
+                info!("Uploading texture {} to gpu", texture_id);
                 // Upload that texture:
                 let texture_size = wgpu::Extent3d {
                     width: sprite.texture.dims.0,
@@ -561,8 +567,7 @@ impl Layer {
                             instance.size[1] * self.y_mult,
                         ],
                         #[allow(clippy::cast_precision_loss)]
-                        width_mul: instance.animation_frame as f32
-                            / sprite.texture.number_anim_frames as f32,
+                        width_mul: 1.0 / sprite.texture.number_anim_frames as f32,
                         #[allow(clippy::cast_precision_loss)]
                         width_offs: instance.animation_frame as f32
                             / sprite.texture.number_anim_frames as f32,
