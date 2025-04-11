@@ -6,7 +6,7 @@ use std::{
 
 use image::GenericImageView;
 use log::{info, warn};
-use wgpu::{util::DeviceExt, SurfaceError};
+use wgpu::{util::DeviceExt, RenderPass, SurfaceError};
 
 // Main Thread only
 pub struct Display {
@@ -31,7 +31,7 @@ impl Display {
 
         // The instance is a handle to our GPU
         // Backends::all => Vulkan + Metal + DX12 + Browser WebGPU
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             #[cfg(not(target_arch = "wasm32"))]
             backends: wgpu::Backends::PRIMARY,
             #[cfg(target_arch = "wasm32")]
@@ -203,6 +203,7 @@ impl Display {
                 texture_bind_group_layout,
                 textures: HashMap::new(),
             }),
+
             sprite_shader: shader,
         }
     }
@@ -319,25 +320,9 @@ pub struct Renderer {
     textures: HashMap<u32, wgpu::BindGroup>,
 }
 
-impl Renderer {
-    // fn new(display: &Display) -> Self {
-    //     let output = display.surface.get_current_texture().unwrap();
-
-    //     let view = output
-    //         .texture
-    //         .create_view(&wgpu::TextureViewDescriptor::default());
-
-    //     let encoder = display
-    //         .device
-    //         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-    //             label: Some("Render Encoder"),
-    //         });
-
-    //     Self { view, encoder }
-    // }
-
+impl RendererTrait for Renderer {
     #[allow(clippy::too_many_lines)]
-    pub fn draw(&mut self, layer: &Layer) {
+    fn draw(&mut self, layer: &Layer) {
         let diffuse_sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
@@ -476,6 +461,308 @@ impl Renderer {
             render_pass.draw_indexed(0..6, 0, 0..instances.len().try_into().unwrap());
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct RawRenderer {
+    queue: wgpu::Queue,
+    device: wgpu::Device,
+
+    render_pipeline: wgpu::RenderPipeline,
+
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+
+    texture_bind_group_layout: wgpu::BindGroupLayout,
+}
+
+impl RawRenderer {
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target_format: wgpu::TextureFormat,
+    ) -> Self {
+        // Shader code in this tutorial assumes an sRGB surface texture. Using a different
+        // one will result in all the colors coming out darker. If you want to support non
+        // sRGB surfaces, you'll need to account for that when drawing to the frame.
+        let texture_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        // This should match the filterable field of the
+                        // corresponding Texture entry above.
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+                label: Some("texture_bind_group_layout"),
+            });
+
+        let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts: &[&texture_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Render Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),            // 1.
+                buffers: &[vertex_desc(), index_desc()], // 2.
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                // 3.
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    // 4.
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList, // 1.
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw, // 2.
+                cull_mode: Some(wgpu::Face::Back),
+                // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
+                polygon_mode: wgpu::PolygonMode::Fill,
+                // Requires Features::DEPTH_CLIP_CONTROL
+                unclipped_depth: false,
+                // Requires Features::CONSERVATIVE_RASTERIZATION
+                conservative: false,
+            },
+            depth_stencil: None, // 1.
+            multisample: wgpu::MultisampleState {
+                count: 1,                         // 2.
+                mask: !0,                         // 3.
+                alpha_to_coverage_enabled: false, // 4.
+            },
+            multiview: None, // 5.
+            cache: None,     // 6.
+        });
+
+        let texture_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        // This should match the filterable field of the
+                        // corresponding Texture entry above.
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+                label: Some("texture_bind_group_layout"),
+            });
+
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: bytemuck::bytes_of(&[
+                0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0,
+            ]),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Index Buffer"),
+            contents: bytemuck::cast_slice(&[0u16, 1, 2, 3, 4, 5]),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        Self {
+            queue: queue.clone(),
+            device: device.clone(),
+
+            texture_bind_group_layout,
+
+            render_pipeline,
+
+            vertex_buffer,
+            index_buffer,
+        }
+    }
+
+    pub fn start_draw<'a, 'b, 'c>(
+        &'a self,
+        render_pass: &'b mut RenderPass<'c>,
+    ) -> InprogressRawRenderer<'a, 'b, 'c> {
+        InprogressRawRenderer {
+            raw_renderer: self,
+            render_pass,
+        }
+    }
+}
+
+pub struct InprogressRawRenderer<'a, 'b, 'c> {
+    raw_renderer: &'a RawRenderer,
+    render_pass: &'b mut RenderPass<'c>,
+}
+
+impl<'a, 'b, 'c> RendererTrait for InprogressRawRenderer<'a, 'b, 'c> {
+    fn draw(&mut self, layer: &Layer) {
+        let diffuse_sampler = self
+            .raw_renderer
+            .device
+            .create_sampler(&wgpu::SamplerDescriptor {
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Nearest,
+                mipmap_filter: wgpu::FilterMode::Nearest,
+                ..Default::default()
+            });
+
+        self.render_pass
+            .set_vertex_buffer(0, self.raw_renderer.vertex_buffer.slice(..));
+
+        // For each texture:
+        for (texture_id, (sprite, instances)) in &layer.commands.commands {
+            let bind_group = {
+                info!("Uploading texture {} to gpu", texture_id);
+                // Upload that texture:
+                let texture_size = wgpu::Extent3d {
+                    width: sprite.texture.dims.0,
+                    height: sprite.texture.dims.1,
+                    // All textures are stored as 3D, we represent our 2D texture
+                    // by setting depth to 1.
+                    depth_or_array_layers: 1,
+                };
+
+                let diffuse_texture =
+                    self.raw_renderer
+                        .device
+                        .create_texture(&wgpu::TextureDescriptor {
+                            size: texture_size,
+                            mip_level_count: 1, // We'll talk about this a little later
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            // Most images are stored using sRGB, so we need to reflect that here.
+                            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                            // TEXTURE_BINDING tells wgpu that we want to use this texture in shaders
+                            // COPY_DST means that we want to copy data to this texture
+                            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                                | wgpu::TextureUsages::COPY_DST,
+                            label: Some("diffuse_texture"),
+                            // This is the same as with the SurfaceConfig. It
+                            // specifies what texture formats can be used to
+                            // create TextureViews for this texture. The base
+                            // texture format (Rgba8UnormSrgb in this case) is
+                            // always supported. Note that using a different
+                            // texture format is not supported on the WebGL2
+                            // backend.
+                            view_formats: &[],
+                        });
+
+                self.raw_renderer.queue.write_texture(
+                    // Tells wgpu where to copy the pixel data
+                    wgpu::ImageCopyTexture {
+                        texture: &diffuse_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    // The actual pixel data
+                    &sprite.texture.data,
+                    // The layout of the texture
+                    wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * sprite.texture.dims.0),
+                        rows_per_image: Some(sprite.texture.dims.1),
+                    },
+                    texture_size,
+                );
+
+                // We don't need to configure the texture view much, so let's
+                // let wgpu define it.
+                let diffuse_texture_view =
+                    diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+                let diffuse_bind_group =
+                    self.raw_renderer
+                        .device
+                        .create_bind_group(&wgpu::BindGroupDescriptor {
+                            layout: &self.raw_renderer.texture_bind_group_layout,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &diffuse_texture_view,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::Sampler(&diffuse_sampler),
+                                },
+                            ],
+                            label: Some("diffuse_bind_group"),
+                        });
+
+                diffuse_bind_group
+            };
+
+            self.render_pass
+                .set_pipeline(&self.raw_renderer.render_pipeline);
+
+            let instance_data = &instances;
+            let instance_buffer =
+                self.raw_renderer
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Instance Buffer for layer"),
+                        contents: bytemuck::cast_slice(instance_data),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+
+            self.render_pass
+                .set_vertex_buffer(1, instance_buffer.slice(..));
+            self.render_pass.set_index_buffer(
+                self.raw_renderer.index_buffer.slice(..),
+                wgpu::IndexFormat::Uint16,
+            );
+
+            self.render_pass.set_bind_group(0, &bind_group, &[]);
+
+            self.render_pass
+                .draw_indexed(0..6, 0, 0..instances.len().try_into().unwrap());
+        }
+    }
+}
+
+pub trait RendererTrait {
+    fn draw(&mut self, layer: &Layer);
 }
 
 #[derive(Debug)]
