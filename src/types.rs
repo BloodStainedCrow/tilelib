@@ -5,7 +5,7 @@ use std::{
 };
 
 use image::GenericImageView;
-use log::{info, warn};
+use log::{info, trace, warn};
 use wgpu::{util::DeviceExt, RenderPass, SurfaceError};
 
 // Main Thread only
@@ -363,7 +363,7 @@ impl RendererTrait for Renderer {
             let bind_group = if let Some(texture) = self.textures.get(texture_id) {
                 texture
             } else {
-                info!("Uploading texture {} to gpu", texture_id);
+                trace!("Uploading texture {} to gpu", texture_id);
                 // Upload that texture:
                 let texture_size = wgpu::Extent3d {
                     width: sprite.texture.dims.0,
@@ -651,7 +651,7 @@ impl<'a, 'b, 'c> RendererTrait for InprogressRawRenderer<'a, 'b, 'c> {
         // For each texture:
         for (texture_id, (sprite, instances)) in &layer.commands.commands {
             let bind_group = {
-                info!("Uploading texture {} to gpu", texture_id);
+                trace!("Uploading texture {} to gpu", texture_id);
                 // Upload that texture:
                 let texture_size = wgpu::Extent3d {
                     width: sprite.texture.dims.0,
