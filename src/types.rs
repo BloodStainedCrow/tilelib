@@ -51,21 +51,19 @@ impl Display {
 
         info!("Using adapter {}", adapter.get_info().name);
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                required_features: wgpu::Features::empty(),
-                // WebGL doesn't support all of wgpu's features, so if
-                // we're building for the web, we'll have to disable some.
-                required_limits: if cfg!(target_arch = "wasm32") {
-                    wgpu::Limits::downlevel_webgl2_defaults()
-                } else {
-                    wgpu::Limits::default()
-                },
-                label: None,
-                memory_hints: wgpu::MemoryHints::default(),
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::empty(),
+            // WebGL doesn't support all of wgpu's features, so if
+            // we're building for the web, we'll have to disable some.
+            required_limits: if cfg!(target_arch = "wasm32") {
+                wgpu::Limits::downlevel_webgl2_defaults()
+            } else {
+                wgpu::Limits::default()
             },
-            None, // Trace path
-        ))
+            label: None,
+            memory_hints: wgpu::MemoryHints::default(),
+            trace: wgpu::Trace::Off,
+        }))
         .unwrap();
 
         let surface_caps = surface.get_capabilities(&adapter);
