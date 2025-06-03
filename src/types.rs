@@ -138,7 +138,7 @@ impl Display {
                 targets: &[Some(wgpu::ColorTargetState {
                     // 4.
                     format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -533,7 +533,7 @@ impl RawRenderer {
                 targets: &[Some(wgpu::ColorTargetState {
                     // 4.
                     format: target_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -668,7 +668,7 @@ impl<'a, 'b, 'c> RendererTrait for InprogressRawRenderer<'a, 'b, 'c> {
                             sample_count: 1,
                             dimension: wgpu::TextureDimension::D2,
                             // Most images are stored using sRGB, so we need to reflect that here.
-                            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                            format: wgpu::TextureFormat::Rgba8Unorm,
                             // TEXTURE_BINDING tells wgpu that we want to use this texture in shaders
                             // COPY_DST means that we want to copy data to this texture
                             usage: wgpu::TextureUsages::TEXTURE_BINDING
@@ -865,7 +865,7 @@ impl Layer {
 
 #[derive(Debug, Clone)]
 pub struct Sprite {
-    texture: Texture,
+    pub texture: Texture,
     custom_shader: Option<Arc<Shader>>,
 }
 
@@ -887,7 +887,7 @@ impl Sprite {
 #[derive(Debug, Clone)]
 pub struct Texture {
     id: u32,
-    number_anim_frames: u32,
+    pub number_anim_frames: u32,
     data: Arc<[u8]>,
     dims: (u32, u32),
 }
