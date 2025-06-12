@@ -5,8 +5,12 @@ use std::{
 };
 
 use image::GenericImageView;
+use itertools::Itertools;
 use log::{info, trace, warn};
-use wgpu::{util::DeviceExt, RenderPass, SurfaceError};
+use wgpu::{
+    util::DeviceExt, DepthBiasState, DepthStencilState, LoadOp, Operations, RenderPass,
+    RenderPassDepthStencilAttachment, Sampler, StencilState, SurfaceError, TextureView,
+};
 
 // Main Thread only
 pub struct Display {
@@ -169,6 +173,8 @@ impl Display {
 
         let output = surface.get_current_texture().unwrap();
 
+        let depth_texture = create_depth_texture(&device, &config, "depth_texture");
+
         let encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
@@ -195,6 +201,7 @@ impl Display {
                 device,
                 encoder,
                 output: Some(output),
+                depth: Some(depth_texture.0),
                 pipeline: render_pipeline,
                 vertex_buffer,
                 index_buffer,
@@ -215,6 +222,7 @@ impl Display {
                 queue,
                 device,
                 output,
+                depth,
                 encoder,
                 pipeline,
                 vertex_buffer,
@@ -224,6 +232,7 @@ impl Display {
             } = self.renderer.take().unwrap();
 
             mem::drop(output);
+            mem::drop(depth);
 
             let output = loop {
                 self.surface.configure(&device, &self.config);
@@ -233,10 +242,13 @@ impl Display {
                 }
             };
 
+            let depth = create_depth_texture(&device, &self.config, "depth_texture");
+
             self.renderer = Some(Renderer {
                 device,
                 queue,
                 output: Some(output),
+                depth: Some(depth.0),
                 encoder,
                 pipeline,
                 vertex_buffer,
@@ -264,6 +276,7 @@ impl Display {
             queue,
             device,
             output,
+            depth,
             encoder,
             pipeline,
             vertex_buffer,
@@ -290,6 +303,7 @@ impl Display {
             device,
             queue,
             output,
+            depth,
             encoder,
             pipeline,
             vertex_buffer,
@@ -308,6 +322,7 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     output: Option<wgpu::SurfaceTexture>,
+    depth: Option<wgpu::Texture>,
     encoder: wgpu::CommandEncoder,
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
@@ -339,6 +354,12 @@ impl RendererTrait for Renderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
+        let Some(depth) = &self.depth else {
+            return;
+        };
+
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+
         let mut render_pass = self.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("layer renderer"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -349,7 +370,14 @@ impl RendererTrait for Renderer {
                     store: wgpu::StoreOp::Store,
                 },
             })],
-            depth_stencil_attachment: None,
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view: &depth_view,
+                depth_ops: Some(Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
             timestamp_writes: None,
             occlusion_query_set: None,
         });
@@ -459,6 +487,15 @@ impl RendererTrait for Renderer {
             render_pass.draw_indexed(0..6, 0, 0..instances.len().try_into().unwrap());
         }
     }
+
+    fn get_aspect_ratio(&self) -> f32 {
+        self.output
+            .as_ref()
+            .map(|output_texture| {
+                output_texture.texture.width() as f32 / output_texture.texture.height() as f32
+            })
+            .unwrap_or(1.0)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -550,7 +587,14 @@ impl RawRenderer {
                 // Requires Features::CONSERVATIVE_RASTERIZATION
                 conservative: false,
             },
-            depth_stencil: None, // 1.
+            // depth_stencil: Some(DepthStencilState {
+            //     format: DEPTH_FORMAT,
+            //     depth_write_enabled: true,
+            //     depth_compare: wgpu::CompareFunction::Less,
+            //     stencil: StencilState::default(),
+            //     bias: DepthBiasState::default(),
+            // }), // 1.
+            depth_stencil: None,
             multisample: wgpu::MultisampleState {
                 count: 1,                         // 2.
                 mask: !0,                         // 3.
@@ -615,10 +659,12 @@ impl RawRenderer {
     pub fn start_draw<'a, 'b, 'c>(
         &'a self,
         render_pass: &'b mut RenderPass<'c>,
+        canvas_size: [f32; 2],
     ) -> InprogressRawRenderer<'a, 'b, 'c> {
         InprogressRawRenderer {
             raw_renderer: self,
             render_pass,
+            canvas_size,
         }
     }
 }
@@ -626,6 +672,7 @@ impl RawRenderer {
 pub struct InprogressRawRenderer<'a, 'b, 'c> {
     raw_renderer: &'a RawRenderer,
     render_pass: &'b mut RenderPass<'c>,
+    canvas_size: [f32; 2],
 }
 
 impl<'a, 'b, 'c> RendererTrait for InprogressRawRenderer<'a, 'b, 'c> {
@@ -647,7 +694,9 @@ impl<'a, 'b, 'c> RendererTrait for InprogressRawRenderer<'a, 'b, 'c> {
             .set_vertex_buffer(0, self.raw_renderer.vertex_buffer.slice(..));
 
         // For each texture:
-        for (texture_id, (sprite, instances)) in &layer.commands.commands {
+        for (texture_id, (sprite, instances)) in
+            layer.commands.commands.iter().sorted_by_key(|v| *v.0)
+        {
             let bind_group = {
                 trace!("Uploading texture {} to gpu", texture_id);
                 // Upload that texture:
@@ -757,10 +806,15 @@ impl<'a, 'b, 'c> RendererTrait for InprogressRawRenderer<'a, 'b, 'c> {
                 .draw_indexed(0..6, 0, 0..instances.len().try_into().unwrap());
         }
     }
+
+    fn get_aspect_ratio(&self) -> f32 {
+        self.canvas_size[0] / self.canvas_size[1]
+    }
 }
 
 pub trait RendererTrait {
     fn draw(&mut self, layer: &Layer);
+    fn get_aspect_ratio(&self) -> f32;
 }
 
 #[derive(Debug)]
@@ -807,11 +861,11 @@ impl Layer {
     }
 
     #[must_use]
-    pub fn square_tile_grid(tile_size: f32) -> Self {
+    pub fn square_tile_grid(tile_size: f32, aspect_ratio: f32) -> Self {
         // TODO: The tiles are not square if the draw surface is not square
         Self {
             x_mult: tile_size,
-            y_mult: tile_size,
+            y_mult: tile_size * aspect_ratio,
             commands: DrawSpriteCommands::default(),
         }
     }
@@ -959,4 +1013,48 @@ fn index_desc() -> wgpu::VertexBufferLayout<'static> {
             },
         ],
     }
+}
+
+pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float; // 1.
+
+pub fn create_depth_texture(
+    device: &wgpu::Device,
+    config: &wgpu::SurfaceConfiguration,
+    label: &str,
+) -> (wgpu::Texture, TextureView, Sampler) {
+    let size = wgpu::Extent3d {
+        // 2.
+        width: config.width.max(1),
+        height: config.height.max(1),
+        depth_or_array_layers: 1,
+    };
+    let desc = wgpu::TextureDescriptor {
+        label: Some(label),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT // 3.
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    };
+    let texture = device.create_texture(&desc);
+
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        // 4.
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Nearest,
+        compare: Some(wgpu::CompareFunction::LessEqual), // 5.
+        lod_min_clamp: 0.0,
+        lod_max_clamp: 100.0,
+        ..Default::default()
+    });
+
+    (texture, view, sampler)
 }
