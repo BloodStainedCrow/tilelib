@@ -1,15 +1,18 @@
 use std::{
     collections::HashMap,
     mem,
-    sync::{atomic::AtomicU32, Arc},
+    sync::{atomic::AtomicU32, Arc, Mutex},
 };
 
 use image::GenericImageView;
 use itertools::Itertools;
 use log::{info, trace, warn};
 use wgpu::{
-    util::DeviceExt, DepthBiasState, DepthStencilState, LoadOp, Operations, RenderPass,
-    RenderPassDepthStencilAttachment, Sampler, StencilState, SurfaceError, TextureView,
+    util::DeviceExt,
+    wgt::{CommandEncoderDescriptor, TextureDescriptor},
+    BufferUsages, Extent3d, Operations, RenderPass, RenderPassDepthStencilAttachment, Sampler,
+    TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, TextureFormat, TextureUsages,
+    TextureView,
 };
 
 // Main Thread only
@@ -207,6 +210,8 @@ impl Display {
                 index_buffer,
                 texture_bind_group_layout,
                 textures: HashMap::new(),
+
+                runtime_textures: HashMap::new(),
             }),
 
             sprite_shader: shader,
@@ -229,6 +234,8 @@ impl Display {
                 index_buffer,
                 texture_bind_group_layout,
                 textures,
+
+                runtime_textures,
             } = self.renderer.take().unwrap();
 
             mem::drop(output);
@@ -255,6 +262,8 @@ impl Display {
                 index_buffer,
                 texture_bind_group_layout,
                 textures,
+
+                runtime_textures,
             });
         }
     }
@@ -283,6 +292,8 @@ impl Display {
             index_buffer,
             texture_bind_group_layout,
             textures,
+
+            runtime_textures,
         } = renderer;
 
         if let Some(output) = output {
@@ -310,6 +321,8 @@ impl Display {
             index_buffer,
             texture_bind_group_layout,
             textures,
+
+            runtime_textures,
         });
 
         Ok(())
@@ -331,6 +344,8 @@ pub struct Renderer {
     texture_bind_group_layout: wgpu::BindGroupLayout,
 
     textures: HashMap<u32, wgpu::BindGroup>,
+
+    runtime_textures: HashMap<usize, wgpu::Texture>,
 }
 
 impl RendererTrait for Renderer {
@@ -340,7 +355,7 @@ impl RendererTrait for Renderer {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
             mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
@@ -385,7 +400,7 @@ impl RendererTrait for Renderer {
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
 
         // For each texture:
-        for (texture_id, (sprite, instances)) in &layer.commands.commands {
+        for (texture_id, (sprite, instances)) in &layer.sprite_commands.commands {
             let bind_group = if let Some(texture) = self.textures.get(texture_id) {
                 texture
             } else {
@@ -489,12 +504,118 @@ impl RendererTrait for Renderer {
     }
 
     fn get_aspect_ratio(&self) -> f32 {
-        self.output
-            .as_ref()
-            .map(|output_texture| {
-                output_texture.texture.width() as f32 / output_texture.texture.height() as f32
-            })
-            .unwrap_or(1.0)
+        self.output.as_ref().map_or(1.0, |output_texture| {
+            output_texture.texture.width() as f32 / output_texture.texture.height() as f32
+        })
+    }
+
+    fn do_texture_updates<I: IntoIterator<Item = (usize, usize, [u8; 4])>>(
+        &mut self,
+        runtime_texture_id: usize,
+        iter: I,
+    ) {
+        if !self.runtime_textures.contains_key(&runtime_texture_id) {
+            return;
+        }
+
+        let data_layout = TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: None,
+            rows_per_image: None,
+        };
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor { label: None });
+
+        for (x, y, rbg) in iter {
+            let buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: None,
+                    contents: &rbg,
+                    usage: BufferUsages::COPY_SRC,
+                });
+
+            encoder.copy_buffer_to_texture(
+                TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: data_layout,
+                },
+                TexelCopyTextureInfo {
+                    texture: &self.runtime_textures[&runtime_texture_id],
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: x.try_into().unwrap(),
+                        y: y.try_into().unwrap(),
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        self.queue.submit([encoder.finish()]);
+    }
+
+    fn create_runtime_texture_if_missing(
+        &mut self,
+        runtime_texture_id: usize,
+        size: [usize; 2],
+        initial_value: impl FnOnce() -> Vec<u8>,
+    ) -> bool {
+        if self.runtime_textures.contains_key(&runtime_texture_id) {
+            return false;
+        }
+
+        let val = initial_value();
+
+        assert_eq!(val.len(), 4 * size[0] * size[1]);
+
+        let texture = self.device.create_texture(&TextureDescriptor {
+            label: None,
+            size: Extent3d {
+                width: size[0] as u32,
+                height: size[1] as u32,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: TextureFormat::Rgba8Uint,
+            usage: TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        self.queue.write_texture(
+            // Tells wgpu where to copy the pixel data
+            wgpu::ImageCopyTexture {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            // The actual pixel data
+            &val,
+            // The layout of the texture
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * size[0] as u32),
+                rows_per_image: Some(size[1] as u32),
+            },
+            Extent3d {
+                width: size[0] as u32,
+                height: size[1] as u32,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        self.runtime_textures.insert(runtime_texture_id, texture);
+
+        true
     }
 }
 
@@ -509,6 +630,9 @@ pub struct RawRenderer {
     index_buffer: wgpu::Buffer,
 
     texture_bind_group_layout: wgpu::BindGroupLayout,
+
+    runtime_textures: Arc<Mutex<HashMap<usize, wgpu::Texture>>>,
+    color_buffer_cache: Arc<Mutex<HashMap<[u8; 4], wgpu::Buffer>>>,
 }
 
 impl RawRenderer {
@@ -604,31 +728,6 @@ impl RawRenderer {
             cache: None,     // 6.
         });
 
-        let texture_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            multisampled: false,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        // This should match the filterable field of the
-                        // corresponding Texture entry above.
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-                label: Some("texture_bind_group_layout"),
-            });
-
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
             contents: bytemuck::bytes_of(&[
@@ -653,6 +752,9 @@ impl RawRenderer {
 
             vertex_buffer,
             index_buffer,
+
+            runtime_textures: Arc::new(Mutex::new(HashMap::new())),
+            color_buffer_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -684,7 +786,7 @@ impl<'a, 'b, 'c> RendererTrait for InprogressRawRenderer<'a, 'b, 'c> {
                 address_mode_u: wgpu::AddressMode::ClampToEdge,
                 address_mode_v: wgpu::AddressMode::ClampToEdge,
                 address_mode_w: wgpu::AddressMode::ClampToEdge,
-                mag_filter: wgpu::FilterMode::Linear,
+                mag_filter: wgpu::FilterMode::Nearest,
                 min_filter: wgpu::FilterMode::Nearest,
                 mipmap_filter: wgpu::FilterMode::Nearest,
                 ..Default::default()
@@ -694,8 +796,11 @@ impl<'a, 'b, 'c> RendererTrait for InprogressRawRenderer<'a, 'b, 'c> {
             .set_vertex_buffer(0, self.raw_renderer.vertex_buffer.slice(..));
 
         // For each texture:
-        for (texture_id, (sprite, instances)) in
-            layer.commands.commands.iter().sorted_by_key(|v| *v.0)
+        for (texture_id, (sprite, instances)) in layer
+            .sprite_commands
+            .commands
+            .iter()
+            .sorted_by_key(|v| *v.0)
         {
             let bind_group = {
                 trace!("Uploading texture {} to gpu", texture_id);
@@ -805,23 +910,234 @@ impl<'a, 'b, 'c> RendererTrait for InprogressRawRenderer<'a, 'b, 'c> {
             self.render_pass
                 .draw_indexed(0..6, 0, 0..instances.len().try_into().unwrap());
         }
+
+        let runtime_textures = self.raw_renderer.runtime_textures.lock().unwrap();
+        for (texture_id, instances) in layer.runtime_commands.iter().sorted_by_key(|v| *v.0) {
+            let bind_group = {
+                let texture = &runtime_textures[texture_id];
+
+                // We don't need to configure the texture view much, so let's
+                // let wgpu define it.
+                let diffuse_texture_view =
+                    texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+                let diffuse_bind_group =
+                    self.raw_renderer
+                        .device
+                        .create_bind_group(&wgpu::BindGroupDescriptor {
+                            layout: &self.raw_renderer.texture_bind_group_layout,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &diffuse_texture_view,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::Sampler(&diffuse_sampler),
+                                },
+                            ],
+                            label: Some("diffuse_bind_group"),
+                        });
+
+                diffuse_bind_group
+            };
+
+            self.render_pass
+                .set_pipeline(&self.raw_renderer.render_pipeline);
+
+            let instance_data = &instances;
+            let instance_buffer =
+                self.raw_renderer
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Instance Buffer for layer"),
+                        contents: bytemuck::cast_slice(instance_data),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+
+            self.render_pass
+                .set_vertex_buffer(1, instance_buffer.slice(..));
+            self.render_pass.set_index_buffer(
+                self.raw_renderer.index_buffer.slice(..),
+                wgpu::IndexFormat::Uint16,
+            );
+
+            self.render_pass.set_bind_group(0, &bind_group, &[]);
+
+            self.render_pass
+                .draw_indexed(0..6, 0, 0..instances.len().try_into().unwrap());
+        }
     }
 
     fn get_aspect_ratio(&self) -> f32 {
         self.canvas_size[0] / self.canvas_size[1]
+    }
+
+    fn do_texture_updates<I: IntoIterator<Item = (usize, usize, [u8; 4])>>(
+        &mut self,
+        runtime_texture_id: usize,
+        iter: I,
+    ) {
+        if !self
+            .raw_renderer
+            .runtime_textures
+            .lock()
+            .unwrap()
+            .contains_key(&runtime_texture_id)
+        {
+            return;
+        }
+
+        let data_layout = TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: None,
+            rows_per_image: None,
+        };
+
+        let mut encoder = self
+            .raw_renderer
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor { label: None });
+
+        let texture = &self.raw_renderer.runtime_textures.lock().unwrap()[&runtime_texture_id];
+
+        let mut cache = self.raw_renderer.color_buffer_cache.lock().unwrap();
+
+        for (x, y, rgb) in iter {
+            let buffer = match cache.entry(rgb) {
+                std::collections::hash_map::Entry::Occupied(occupied_entry) => {
+                    occupied_entry.into_mut()
+                }
+                std::collections::hash_map::Entry::Vacant(vacant_entry) => {
+                    vacant_entry.insert(self.raw_renderer.device.create_buffer_init(
+                        &wgpu::util::BufferInitDescriptor {
+                            label: None,
+                            contents: &rgb,
+                            usage: BufferUsages::COPY_SRC,
+                        },
+                    ))
+                }
+            };
+
+            encoder.copy_buffer_to_texture(
+                TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: data_layout,
+                },
+                TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: x.try_into().unwrap(),
+                        y: y.try_into().unwrap(),
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
+        let command_buffer = encoder.finish();
+        self.raw_renderer.queue.submit([command_buffer]);
+    }
+
+    fn create_runtime_texture_if_missing(
+        &mut self,
+        runtime_texture_id: usize,
+        size: [usize; 2],
+        initial_value: impl FnOnce() -> Vec<u8>,
+    ) -> bool {
+        if self
+            .raw_renderer
+            .runtime_textures
+            .lock()
+            .unwrap()
+            .contains_key(&runtime_texture_id)
+        {
+            return false;
+        }
+
+        let val = initial_value();
+
+        let texture = self.raw_renderer.device.create_texture(&TextureDescriptor {
+            label: None,
+            size: Extent3d {
+                width: size[0] as u32,
+                height: size[1] as u32,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::COPY_DST
+                | TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+
+        self.raw_renderer.queue.write_texture(
+            // Tells wgpu where to copy the pixel data
+            wgpu::ImageCopyTexture {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            // The actual pixel data
+            &val,
+            // The layout of the texture
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * size[0] as u32),
+                rows_per_image: Some(size[1] as u32),
+            },
+            Extent3d {
+                width: size[0] as u32,
+                height: size[1] as u32,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        self.raw_renderer
+            .runtime_textures
+            .lock()
+            .unwrap()
+            .insert(runtime_texture_id, texture);
+
+        true
     }
 }
 
 pub trait RendererTrait {
     fn draw(&mut self, layer: &Layer);
     fn get_aspect_ratio(&self) -> f32;
+    fn create_runtime_texture_if_missing(
+        &mut self,
+        runtime_texture_id: usize,
+        size: [usize; 2],
+        initial_value: impl FnOnce() -> Vec<u8>,
+    ) -> bool;
+    fn do_texture_updates<I: IntoIterator<Item = (usize, usize, [u8; 4])>>(
+        &mut self,
+        runtime_texture_id: usize,
+        iter: I,
+    );
 }
 
 #[derive(Debug)]
 pub struct Layer {
     x_mult: f32,
     y_mult: f32,
-    commands: DrawSpriteCommands,
+    sprite_commands: DrawSpriteCommands,
+    runtime_commands: HashMap<usize, Vec<Instance>>,
 }
 
 enum LayerType {
@@ -856,7 +1172,8 @@ impl Layer {
         Self {
             x_mult: 1.0,
             y_mult: 1.0,
-            commands: DrawSpriteCommands::default(),
+            sprite_commands: DrawSpriteCommands::default(),
+            runtime_commands: HashMap::default(),
         }
     }
 
@@ -866,7 +1183,8 @@ impl Layer {
         Self {
             x_mult: tile_size,
             y_mult: tile_size * aspect_ratio,
-            commands: DrawSpriteCommands::default(),
+            sprite_commands: DrawSpriteCommands::default(),
+            runtime_commands: HashMap::default(),
         }
     }
 
@@ -875,7 +1193,7 @@ impl Layer {
     pub fn draw_sprite(&mut self, sprite: &Sprite, instance: DrawInstance) {
         assert!(instance.animation_frame < sprite.texture.number_anim_frames);
 
-        if let Some((a, b)) = self.commands.commands.get_mut(&sprite.texture.id) {
+        if let Some((a, b)) = self.sprite_commands.commands.get_mut(&sprite.texture.id) {
             b.push(Instance {
                 position: [
                     instance.position[0] * self.x_mult,
@@ -892,7 +1210,7 @@ impl Layer {
                     / sprite.texture.number_anim_frames as f32,
             });
         } else {
-            self.commands.commands.insert(
+            self.sprite_commands.commands.insert(
                 sprite.texture.id,
                 (
                     sprite.clone(),
@@ -912,6 +1230,39 @@ impl Layer {
                             / sprite.texture.number_anim_frames as f32,
                     }],
                 ),
+            );
+        }
+    }
+
+    pub fn draw_runtime_texture(&mut self, texture_id: usize, instance: DrawInstance) {
+        if let Some(b) = self.runtime_commands.get_mut(&texture_id) {
+            b.push(Instance {
+                position: [
+                    instance.position[0] * self.x_mult,
+                    instance.position[1] * self.y_mult,
+                ],
+                size: [
+                    instance.size[0] * self.x_mult,
+                    instance.size[1] * self.y_mult,
+                ],
+                width_mul: 1.0,
+                width_offs: 0.0,
+            });
+        } else {
+            self.runtime_commands.insert(
+                texture_id,
+                vec![Instance {
+                    position: [
+                        instance.position[0] * self.x_mult,
+                        instance.position[1] * self.y_mult,
+                    ],
+                    size: [
+                        instance.size[0] * self.x_mult,
+                        instance.size[1] * self.y_mult,
+                    ],
+                    width_mul: 1.0,
+                    width_offs: 0.0,
+                }],
             );
         }
     }
