@@ -769,6 +769,10 @@ impl RawRenderer {
             canvas_size,
         }
     }
+
+    pub fn reset_runtime_textures(&mut self) {
+        self.runtime_textures = Default::default();
+    }
 }
 
 pub struct InprogressRawRenderer<'a, 'b, 'c> {
