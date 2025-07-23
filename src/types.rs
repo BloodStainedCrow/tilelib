@@ -1181,6 +1181,32 @@ impl Layer {
         }
     }
 
+    pub fn extend(&mut self, other: Self) {
+        assert_eq!(self.x_mult, other.x_mult);
+        assert_eq!(self.y_mult, other.y_mult);
+        for (k, v) in other.runtime_commands {
+            match self.runtime_commands.entry(k) {
+                std::collections::hash_map::Entry::Occupied(mut occupied_entry) => {
+                    occupied_entry.get_mut().extend(v)
+                }
+                std::collections::hash_map::Entry::Vacant(vacant_entry) => {
+                    vacant_entry.insert(v);
+                }
+            }
+        }
+        for (k, v) in other.sprite_commands.commands {
+            match self.sprite_commands.commands.entry(k) {
+                std::collections::hash_map::Entry::Occupied(mut occupied_entry) => {
+                    let (sprite, instances) = occupied_entry.get_mut();
+                    instances.extend(v.1);
+                }
+                std::collections::hash_map::Entry::Vacant(vacant_entry) => {
+                    vacant_entry.insert(v);
+                }
+            }
+        }
+    }
+
     #[must_use]
     pub fn square_tile_grid(tile_size: f32, aspect_ratio: f32) -> Self {
         // TODO: The tiles are not square if the draw surface is not square
