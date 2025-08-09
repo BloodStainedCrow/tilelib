@@ -561,6 +561,10 @@ impl RendererTrait for Renderer {
         self.queue.submit([encoder.finish()]);
     }
 
+    fn has_runtime_texture(&self, runtime_texture_id: usize) -> bool {
+        self.runtime_textures.contains_key(&runtime_texture_id)
+    }
+
     fn create_runtime_texture_if_missing(
         &mut self,
         runtime_texture_id: usize,
@@ -1052,6 +1056,14 @@ impl<'a, 'b, 'c> RendererTrait for InprogressRawRenderer<'a, 'b, 'c> {
         self.raw_renderer.queue.submit([command_buffer]);
     }
 
+    fn has_runtime_texture(&self, runtime_texture_id: usize) -> bool {
+        self.raw_renderer
+            .runtime_textures
+            .lock()
+            .unwrap()
+            .contains_key(&runtime_texture_id)
+    }
+
     fn create_runtime_texture_if_missing(
         &mut self,
         runtime_texture_id: usize,
@@ -1129,6 +1141,7 @@ pub trait RendererTrait {
         size: [usize; 2],
         initial_value: impl FnOnce() -> Vec<u8>,
     ) -> bool;
+    fn has_runtime_texture(&self, runtime_texture_id: usize) -> bool;
     fn do_texture_updates<I: IntoIterator<Item = (usize, usize, [u8; 4])>>(
         &mut self,
         runtime_texture_id: usize,
