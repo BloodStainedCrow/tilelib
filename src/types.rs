@@ -1,4 +1,5 @@
 use std::{
+    borrow::Borrow,
     collections::HashMap,
     mem,
     sync::{atomic::AtomicU32, Arc, Mutex},
@@ -565,11 +566,11 @@ impl RendererTrait for Renderer {
         self.runtime_textures.contains_key(&runtime_texture_id)
     }
 
-    fn create_runtime_texture_if_missing(
+    fn create_runtime_texture_if_missing<B: Borrow<[u8]>>(
         &mut self,
         runtime_texture_id: usize,
         size: [usize; 2],
-        initial_value: impl FnOnce() -> Vec<u8>,
+        initial_value: impl FnOnce() -> B,
     ) -> bool {
         if self.runtime_textures.contains_key(&runtime_texture_id) {
             return false;
@@ -577,7 +578,7 @@ impl RendererTrait for Renderer {
 
         let val = initial_value();
 
-        assert_eq!(val.len(), 4 * size[0] * size[1]);
+        assert_eq!(val.borrow().len(), 4 * size[0] * size[1]);
 
         let texture = self.device.create_texture(&TextureDescriptor {
             label: None,
@@ -603,7 +604,7 @@ impl RendererTrait for Renderer {
                 aspect: wgpu::TextureAspect::All,
             },
             // The actual pixel data
-            &val,
+            val.borrow(),
             // The layout of the texture
             wgpu::ImageDataLayout {
                 offset: 0,
@@ -1064,11 +1065,11 @@ impl<'a, 'b, 'c> RendererTrait for InprogressRawRenderer<'a, 'b, 'c> {
             .contains_key(&runtime_texture_id)
     }
 
-    fn create_runtime_texture_if_missing(
+    fn create_runtime_texture_if_missing<B: Borrow<[u8]>>(
         &mut self,
         runtime_texture_id: usize,
         size: [usize; 2],
-        initial_value: impl FnOnce() -> Vec<u8>,
+        initial_value: impl FnOnce() -> B,
     ) -> bool {
         if self
             .raw_renderer
@@ -1108,7 +1109,7 @@ impl<'a, 'b, 'c> RendererTrait for InprogressRawRenderer<'a, 'b, 'c> {
                 aspect: wgpu::TextureAspect::All,
             },
             // The actual pixel data
-            &val,
+            val.borrow(),
             // The layout of the texture
             wgpu::ImageDataLayout {
                 offset: 0,
@@ -1135,11 +1136,11 @@ impl<'a, 'b, 'c> RendererTrait for InprogressRawRenderer<'a, 'b, 'c> {
 pub trait RendererTrait {
     fn draw(&mut self, layer: &Layer);
     fn get_aspect_ratio(&self) -> f32;
-    fn create_runtime_texture_if_missing(
+    fn create_runtime_texture_if_missing<B: Borrow<[u8]>>(
         &mut self,
         runtime_texture_id: usize,
         size: [usize; 2],
-        initial_value: impl FnOnce() -> Vec<u8>,
+        initial_value: impl FnOnce() -> B,
     ) -> bool;
     fn has_runtime_texture(&self, runtime_texture_id: usize) -> bool;
     fn do_texture_updates<I: IntoIterator<Item = (usize, usize, [u8; 4])>>(
