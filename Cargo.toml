@@ -1,19 +1,19 @@
 [package]
 name = "tilelib"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
-bytemuck = { version = "1.21.0", features = ["derive"] }
-egui = "0.31.1"
-egui-wgpu = "0.31.1"
-image = { version = "0.25.5", features = ["png"] }
-itertools = "0.14.0"
-log = "0.4.25"
-pollster = "0.4.0"
-spin_sleep_util = "0.1.1"
+bytemuck = { version = "1.21", features = ["derive"] }
+egui = "0.32"
+egui-wgpu = "0.32"
+image = { version = "0.25", features = ["png"] }
+itertools = "0.14"
+log = "0.4"
+pollster = "0.4"
+spin_sleep_util = "0.1"
 wgpu = "25"
-winit = "0.30.8"
+winit = "0.30"
 
 [lints.clippy]
 pedantic = "deny"
