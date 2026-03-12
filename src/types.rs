@@ -1201,7 +1201,7 @@ impl Layer {
         for (k, v) in other.runtime_commands {
             match self.runtime_commands.entry(k) {
                 std::collections::hash_map::Entry::Occupied(mut occupied_entry) => {
-                    occupied_entry.get_mut().extend(v)
+                    occupied_entry.get_mut().extend(v);
                 }
                 std::collections::hash_map::Entry::Vacant(vacant_entry) => {
                     vacant_entry.insert(v);
@@ -1273,6 +1273,65 @@ impl Layer {
                         width_offs: instance.animation_frame as f32
                             / sprite.texture.number_anim_frames as f32,
                     }],
+                ),
+            );
+        }
+    }
+
+    /// # Panics
+    /// If the instances animation frame is not in range for the sprites' texture
+    pub fn draw_many_sprites(
+        &mut self,
+        sprite: &Sprite,
+        instance: impl IntoIterator<Item = DrawInstance>,
+    ) {
+        if let Some((a, b)) = self.sprite_commands.commands.get_mut(&sprite.texture.id) {
+            b.extend(instance.into_iter().map(|instance| {
+                debug_assert!(instance.animation_frame < sprite.texture.number_anim_frames);
+                Instance {
+                    position: [
+                        instance.position[0] * self.x_mult,
+                        instance.position[1] * self.y_mult,
+                    ],
+                    size: [
+                        instance.size[0] * self.x_mult,
+                        instance.size[1] * self.y_mult,
+                    ],
+                    #[allow(clippy::cast_precision_loss)]
+                    width_mul: 1.0 / sprite.texture.number_anim_frames as f32,
+                    #[allow(clippy::cast_precision_loss)]
+                    width_offs: instance.animation_frame as f32
+                        / sprite.texture.number_anim_frames as f32,
+                }
+            }));
+        } else {
+            self.sprite_commands.commands.insert(
+                sprite.texture.id,
+                (
+                    sprite.clone(),
+                    instance
+                        .into_iter()
+                        .map(|instance| {
+                            debug_assert!(
+                                instance.animation_frame < sprite.texture.number_anim_frames
+                            );
+                            Instance {
+                                position: [
+                                    instance.position[0] * self.x_mult,
+                                    instance.position[1] * self.y_mult,
+                                ],
+                                size: [
+                                    instance.size[0] * self.x_mult,
+                                    instance.size[1] * self.y_mult,
+                                ],
+                                #[allow(clippy::cast_precision_loss)]
+                                width_mul: 1.0 / sprite.texture.number_anim_frames as f32,
+                                #[allow(clippy::cast_precision_loss)]
+                                width_offs: instance.animation_frame as f32
+                                    / sprite.texture.number_anim_frames as f32,
+                            }
+                        })
+                        .collect(),
                 ),
             );
         }
