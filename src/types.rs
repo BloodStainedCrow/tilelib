@@ -352,6 +352,20 @@ pub struct Renderer {
 impl RendererTrait for Renderer {
     #[allow(clippy::too_many_lines)]
     fn draw(&mut self, layer: &Layer) {
+        if layer
+            .sprite_commands
+            .commands
+            .values()
+            .flat_map(|(_a, b)| b)
+            .next()
+            .is_none()
+            && layer.runtime_commands.values().flatten().next().is_none()
+        {
+            // When we do not have anything to draw we must do an early return.
+            // Buffer::slice will panic with a slice of length 0.
+            return;
+        }
+
         let diffuse_sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
@@ -788,6 +802,20 @@ pub struct InprogressRawRenderer<'a, 'b, 'c> {
 
 impl<'a, 'b, 'c> RendererTrait for InprogressRawRenderer<'a, 'b, 'c> {
     fn draw(&mut self, layer: &Layer) {
+        if layer
+            .sprite_commands
+            .commands
+            .values()
+            .flat_map(|(_a, b)| b)
+            .next()
+            .is_none()
+            && layer.runtime_commands.values().flatten().next().is_none()
+        {
+            // When we do not have anything to draw we must do an early return.
+            // Buffer::slice will panic with a slice of length 0.
+            return;
+        }
+
         let diffuse_sampler = self
             .raw_renderer
             .device
