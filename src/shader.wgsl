@@ -21,7 +21,6 @@ fn vs_main(
     model: VertexInput,
 ) -> VertexOutput {
     var out: VertexOutput;
-    let y = min(((model.sprite_dimensions.y * 2 + (model.sprite_position.y * 2.0 - 1.0)) + 1.0) / 2, 1.0);
     out.clip_position = vec4<f32>(model.corner_position.x * model.sprite_dimensions.x * 2 + (model.sprite_position.x * 2.0 - 1.0), -(model.corner_position.y * model.sprite_dimensions.y * 2 + (model.sprite_position.y * 2.0 - 1.0)), 0.0, 1.0);
     out.tex_coords = vec2<f32>(model.corner_position.x * model.texture_width_mul + model.texture_width_offs, model.corner_position.y);
     return out;
