@@ -501,6 +501,7 @@ impl RendererTrait for Renderer {
             render_pass.set_pipeline(&self.pipeline);
 
             let instance_data = &instances;
+            // TODO: I doubt creating this buffer every frame is a great idea
             let instance_buffer =
                 self.device
                     .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -636,12 +637,60 @@ impl RendererTrait for Renderer {
 
         true
     }
+
+    fn do_custom_draw(
+        &mut self,
+        fun: impl FnOnce(&wgpu::Device, &mut RenderPass, &wgpu::Queue, &wgpu::TextureFormat),
+    ) {
+        let Some(output) = &self.output else {
+            return;
+        };
+
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let Some(depth) = &self.depth else {
+            return;
+        };
+
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut render_pass = self.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("custom renderer"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view: &depth_view,
+                depth_ops: Some(Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        (fun)(
+            &self.device,
+            &mut render_pass,
+            &mut self.queue,
+            &output.texture.format(),
+        );
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct RawRenderer {
     queue: wgpu::Queue,
     device: wgpu::Device,
+    target_format: wgpu::TextureFormat,
 
     render_pipeline: wgpu::RenderPipeline,
 
@@ -764,6 +813,7 @@ impl RawRenderer {
         Self {
             queue: queue.clone(),
             device: device.clone(),
+            target_format,
 
             texture_bind_group_layout,
 
@@ -926,6 +976,7 @@ impl<'a, 'b, 'c> RendererTrait for InprogressRawRenderer<'a, 'b, 'c> {
                 .set_pipeline(&self.raw_renderer.render_pipeline);
 
             let instance_data = &instances;
+            // TODO: I doubt creating this buffer every frame is a great idea
             let instance_buffer =
                 self.raw_renderer
                     .device
@@ -1159,6 +1210,18 @@ impl<'a, 'b, 'c> RendererTrait for InprogressRawRenderer<'a, 'b, 'c> {
 
         true
     }
+
+    fn do_custom_draw(
+        &mut self,
+        fun: impl FnOnce(&wgpu::Device, &mut RenderPass, &wgpu::Queue, &wgpu::TextureFormat),
+    ) {
+        (fun)(
+            &self.raw_renderer.device,
+            self.render_pass,
+            &self.raw_renderer.queue,
+            &self.raw_renderer.target_format,
+        );
+    }
 }
 
 pub trait RendererTrait {
@@ -1175,6 +1238,11 @@ pub trait RendererTrait {
         &mut self,
         runtime_texture_id: usize,
         iter: I,
+    );
+
+    fn do_custom_draw(
+        &mut self,
+        fun: impl FnOnce(&wgpu::Device, &mut RenderPass, &wgpu::Queue, &wgpu::TextureFormat),
     );
 }
 
