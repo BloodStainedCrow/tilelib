@@ -640,7 +640,7 @@ impl RendererTrait for Renderer {
 
     fn do_custom_draw(
         &mut self,
-        fun: impl FnOnce(&wgpu::Device, &mut RenderPass, &wgpu::Queue, &wgpu::TextureFormat),
+        fun: impl FnOnce(&wgpu::Device, &mut RenderPass, &wgpu::Queue, &wgpu::TextureFormat, &[u32; 2]),
     ) {
         let Some(output) = &self.output else {
             return;
@@ -682,6 +682,7 @@ impl RendererTrait for Renderer {
             &mut render_pass,
             &mut self.queue,
             &output.texture.format(),
+            &[output.texture.size().width, output.texture.size().height],
         );
     }
 }
@@ -830,7 +831,7 @@ impl RawRenderer {
     pub fn start_draw<'a, 'b, 'c>(
         &'a self,
         render_pass: &'b mut RenderPass<'c>,
-        canvas_size: [f32; 2],
+        canvas_size: [u32; 2],
     ) -> InprogressRawRenderer<'a, 'b, 'c> {
         InprogressRawRenderer {
             raw_renderer: self,
@@ -847,7 +848,7 @@ impl RawRenderer {
 pub struct InprogressRawRenderer<'a, 'b, 'c> {
     raw_renderer: &'a RawRenderer,
     render_pass: &'b mut RenderPass<'c>,
-    canvas_size: [f32; 2],
+    canvas_size: [u32; 2],
 }
 
 impl<'a, 'b, 'c> RendererTrait for InprogressRawRenderer<'a, 'b, 'c> {
@@ -1060,7 +1061,7 @@ impl<'a, 'b, 'c> RendererTrait for InprogressRawRenderer<'a, 'b, 'c> {
     }
 
     fn get_aspect_ratio(&self) -> f32 {
-        self.canvas_size[0] / self.canvas_size[1]
+        self.canvas_size[0] as f32 / self.canvas_size[1] as f32
     }
 
     fn do_texture_updates<I: IntoIterator<Item = (usize, usize, [u8; 4])>>(
@@ -1213,13 +1214,14 @@ impl<'a, 'b, 'c> RendererTrait for InprogressRawRenderer<'a, 'b, 'c> {
 
     fn do_custom_draw(
         &mut self,
-        fun: impl FnOnce(&wgpu::Device, &mut RenderPass, &wgpu::Queue, &wgpu::TextureFormat),
+        fun: impl FnOnce(&wgpu::Device, &mut RenderPass, &wgpu::Queue, &wgpu::TextureFormat, &[u32; 2]),
     ) {
         (fun)(
             &self.raw_renderer.device,
             self.render_pass,
             &self.raw_renderer.queue,
             &self.raw_renderer.target_format,
+            &self.canvas_size,
         );
     }
 }
@@ -1242,7 +1244,7 @@ pub trait RendererTrait {
 
     fn do_custom_draw(
         &mut self,
-        fun: impl FnOnce(&wgpu::Device, &mut RenderPass, &wgpu::Queue, &wgpu::TextureFormat),
+        fun: impl FnOnce(&wgpu::Device, &mut RenderPass, &wgpu::Queue, &wgpu::TextureFormat, &[u32; 2]),
     );
 }
 
